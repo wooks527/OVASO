@@ -16,14 +16,6 @@ def get_model(model_dir, device):
     covid_ft.eval()
     covid_ft = covid_ft.to(device)
     
-    # Create the pneumonia binary model
-    pneumonia_ft = models.resnet50(pretrained=True)
-    pneumonia_num_ftrs = pneumonia_ft.fc.in_features
-    pneumonia_ft.fc = nn.Linear(pneumonia_num_ftrs, 2)
-    pneumonia_ft.load_state_dict(torch.load(f"{model_dir}/pneumonia_binary2.pt"))
-    pneumonia_ft.eval()
-    pneumonia_ft = pneumonia_ft.to(device)
-    
     # Create the normal binary model
     normal_ft = models.resnet50(pretrained=True)
     normal_num_ftrs = normal_ft.fc.in_features
@@ -32,12 +24,20 @@ def get_model(model_dir, device):
     normal_ft.eval()
     normal_ft = normal_ft.to(device)
     
+    # Create the pneumonia binary model
+    pneumonia_ft = models.resnet50(pretrained=True)
+    pneumonia_num_ftrs = pneumonia_ft.fc.in_features
+    pneumonia_ft.fc = nn.Linear(pneumonia_num_ftrs, 2)
+    pneumonia_ft.load_state_dict(torch.load(f"{model_dir}/pneumonia_binary2.pt"))
+    pneumonia_ft.eval()
+    pneumonia_ft = pneumonia_ft.to(device)
+    
     # Create the loss function
     criterion = nn.CrossEntropyLoss()
     
-    return covid_ft, pneumonia_ft, normal_ft, criterion
+    return covid_ft, normal_ft, pneumonia_ft, criterion
 
-def eval_model(dataloaders, covid_model, pneumonia_model, normal_model,
+def eval_model(dataloaders, covid_model, normal_model, pneumonia_model,
                criterion, batch_size, device, out_dir):
     
     def create_workbook():
@@ -81,9 +81,10 @@ def eval_model(dataloaders, covid_model, pneumonia_model, normal_model,
     print('Evaluation Result')
     print('-' * 10)
 
-    # Each epoch has a training and validation phase
-    pneumonia_model.eval()   # Set model to evaluate mode
+    # Set model to evaluate mode
     covid_model.eval()
+    pneumonia_model.eval()   
+    normal_model.eval()   
 
     # Iterate over data.
     for inputs, labels in dataloaders:
@@ -119,22 +120,21 @@ def eval_model(dataloaders, covid_model, pneumonia_model, normal_model,
         covid_confidence = torch.nn.functional.softmax(covid_outputs, dim=1)
         covid_confidence_score = covid_confidence[0][0].item()
         
-        pneumonia_outputs = pneumonia_model(inputs)
-        _, pneumonia_preds = torch.max(pneumonia_outputs, 1)
-        pneumonia_label = pneumonia_preds.item()
-        pneumonia_confidence = torch.nn.functional.softmax(pneumonia_outputs, dim=1)
-        pneumonia_confidence_score = pneumonia_confidence[0][0].item()
-        
         normal_outputs = normal_model(inputs)
         _, normal_preds = torch.max(normal_outputs, 1)
         normal_label = normal_preds.item()
         normal_confidence = torch.nn.functional.softmax(normal_outputs, dim=1)
-        normal_confidence_score = normal_confidence[0][0].item()
+        normal_confidence_score = normal_confidence[0][1].item()
+        
+        pneumonia_outputs = pneumonia_model(inputs)
+        _, pneumonia_preds = torch.max(pneumonia_outputs, 1)
+        pneumonia_label = pneumonia_preds.item()
+        pneumonia_confidence = torch.nn.functional.softmax(pneumonia_outputs, dim=1)
+        pneumonia_confidence_score = pneumonia_confidence[0][1].item()
              
-#         threshold = 0.95
         confidence_scores = [covid_confidence_score, normal_confidence_score, pneumonia_confidence_score]
         pre_label = np.argmax(confidence_scores)
-        print(pre_label, confidence_scores)
+        print(pre_label, correct_label, confidence_scores)
                 
         # Calculate metrics
         if pre_label == correct_label: 
