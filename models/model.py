@@ -1,13 +1,19 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
 import numpy as np
 import os
 import time
 
+from collections import defaultdict
 from openpyxl import Workbook
 from torchvision import datasets, models
 
-def get_model(model_dir, device):
+def get_model(model_dir, device, mtype=''):
+    # Create the loss function
+    criterion = nn.CrossEntropyLoss()
+    
     # Create the covid binary model
     covid_ft = models.resnet50(pretrained=True)
     covid_num_ftrs = covid_ft.fc.in_features
@@ -16,29 +22,106 @@ def get_model(model_dir, device):
     covid_ft.eval()
     covid_ft = covid_ft.to(device)
     
+    if mtype == 'OVR':
+        # Create the normal binary model
+        normal_ft = models.resnet50(pretrained=True)
+        normal_num_ftrs = normal_ft.fc.in_features
+        normal_ft.fc = nn.Linear(normal_num_ftrs, 2)
+        normal_ft.load_state_dict(torch.load(f"{model_dir}/normal_binary2.pt"))
+        normal_ft = normal_ft.to(device)
+
+        # Create the pneumonia binary model
+        pneumonia_ft = models.resnet50(pretrained=True)
+        pneumonia_num_ftrs = pneumonia_ft.fc.in_features
+        pneumonia_ft.fc = nn.Linear(pneumonia_num_ftrs, 2)
+        pneumonia_ft.load_state_dict(torch.load(f"{model_dir}/pneumonia_binary2.pt"))
+        pneumonia_ft = pneumonia_ft.to(device)
+    
+        return covid_ft, normal_ft, pneumonia_ft, criterion
+    else: # Previous OVR
+        nor_pneu_ft = models.resnet50(pretrained=True)
+        nor_pneu_num_ftrs = nor_pneu_ft.fc.in_features
+        nor_pneu_ft.fc = nn.Linear(nor_pneu_num_ftrs, 2)
+        nor_pneu_ft.load_state_dict(torch.load(f"{model_dir}/normal_pneumonia_binary.pt"))
+        nor_pneu_ft = nor_pneu_ft.to(device)
+    
+        return covid_ft, nor_pneu_ft, criterion
+
+def get_model_ft(model_dir, device):
+    # Create the covid binary model
+    covid_ft = models.resnet50(pretrained=True)
+    covid_num_ftrs = covid_ft.fc.in_features
+    covid_ft.fc = nn.Linear(covid_num_ftrs, 2)
+    covid_ft.load_state_dict(torch.load(f"{model_dir}/covid_binary2.pt")) # covid_binary2는 어디에?
+    
     # Create the normal binary model
     normal_ft = models.resnet50(pretrained=True)
     normal_num_ftrs = normal_ft.fc.in_features
     normal_ft.fc = nn.Linear(normal_num_ftrs, 2)
     normal_ft.load_state_dict(torch.load(f"{model_dir}/normal_binary2.pt"))
-    normal_ft.eval()
-    normal_ft = normal_ft.to(device)
     
     # Create the pneumonia binary model
     pneumonia_ft = models.resnet50(pretrained=True)
     pneumonia_num_ftrs = pneumonia_ft.fc.in_features
     pneumonia_ft.fc = nn.Linear(pneumonia_num_ftrs, 2)
     pneumonia_ft.load_state_dict(torch.load(f"{model_dir}/pneumonia_binary2.pt"))
-    pneumonia_ft.eval()
-    pneumonia_ft = pneumonia_ft.to(device)
+    
+    avidnet = AVIDNet(covid_ft, normal_ft, pneumonia_ft)
+    avidnet = avidnet.to(device)
     
     # Create the loss function
     criterion = nn.CrossEntropyLoss()
+    optimizer = optim.SGD(avidnet.parameters(), lr=0.001, momentum=0.9)
+    lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
     
-    return covid_ft, normal_ft, pneumonia_ft, criterion
+    return avidnet, criterion, optimizer, lr_scheduler
 
-def eval_model(dataloaders, covid_model, normal_model, pneumonia_model,
-               criterion, batch_size, device, out_dir):
+def train_model(model, dataloaders, criterion, optimizer, lr_scheduler, device, epochs=10):
+    for epoch in range(epochs):
+        model.train()
+        
+        epoch_loss = 0.0
+        for inputs, labels in dataloaders:
+            inputs = inputs.to(device)
+            labels = labels.to(device)
+            
+            optimizer.zero_grad()
+            
+            with torch.set_grad_enabled(True):
+                outputs = model(inputs)
+                _, preds = torch.max(outputs, 1)
+                loss = criterion(outputs, labels)
+                epoch_loss += loss.item() * inputs.size(0)
+                
+                loss.backward()
+                optimizer.step()
+                
+        lr_scheduler.step()
+        print(f'Epoch: {epoch}/{epochs}, Loss: {epoch_loss}')
+        
+    return model
+
+def eval_model(dataloaders=None, covid_model=None, normal_model=None,
+               pneumonia_model=None, nor_pneu_model=None, avidnet=None,
+               criterion=None, batch_size=1, device=None, out_dir=None, mtype=None):
+    '''Evaluate the model.
+    
+    Args:
+        dataloaders (obj): dataloaders for the evalutation
+        covid_model (obj): covid-19 binary model (0: covid-19, 1: non-covid-19)
+        normal_model (obj): normal binary model (0: non-normal, 1: normal)
+        pneumonia_model (obj): pneumonia binary model (0: non-pneumonia, 1: pneumonia)
+        nor_pneu_model (obj): binary model to classify normal and pneumonia
+                              (0: normal, 1: pneumonia)
+        avidnet (obj): 3-class classification model (0: covid-19, 1: normal, 2: pneumonia)
+        criterion (obj): loss function
+        batch_size (int): batch size
+        device (obj): device to evaluate the model
+        out_dir (str): path to save prediction results
+        mtype (str): one of the OVR model types
+    Returns:
+        preds_dict
+    '''
     
     def create_workbook():
         wb = Workbook()      # 워크북을 생성한다.
@@ -82,58 +165,100 @@ def eval_model(dataloaders, covid_model, normal_model, pneumonia_model,
     print('-' * 10)
 
     # Set model to evaluate mode
-    covid_model.eval()
-    pneumonia_model.eval()   
-    normal_model.eval()   
+    if mtype == 'OVR':
+        covid_model.eval()
+        pneumonia_model.eval()   
+        normal_model.eval()   
+    elif mtype == 'MOVR': # Previous OVR
+        covid_model.eval()
+        nor_pneu_model.eval()
+    else: # AVIDNet-OVR
+        avidnet.eval()
 
     # Iterate over data.
+    preds_dict = defaultdict(list)
     for inputs, labels in dataloaders:
         inputs = inputs.to(device)
         labels = labels.to(device)
 
         correct_label = labels.data[0].item()
 
-#         # Previous OVR model
-#         pneumonia_outputs = pneumonia_model(inputs)
-#         _, pneumonia_preds = torch.max(pneumonia_outputs, 1)
-#         binary_label = pneumonia_preds.item()  #pneumonia_label = 0 = normal/ penumonia_label = 1 = penumonia
+        if mtype == 'OVR': # Basic OVR model
+            # Predict using covid-19 binary model
+            covid_outputs = covid_model(inputs)
+            _, covid_preds = torch.max(covid_outputs, 1)
+            covid_label = covid_preds.item()
+            covid_confidence = torch.nn.functional.softmax(covid_outputs, dim=1)
+            covid_confidence_score = covid_confidence[0][0].item()
+
+            # Predict using normal binary model
+            normal_outputs = normal_model(inputs)
+            _, normal_preds = torch.max(normal_outputs, 1)
+            normal_label = normal_preds.item()
+            normal_confidence = torch.nn.functional.softmax(normal_outputs, dim=1)
+            normal_confidence_score = normal_confidence[0][1].item()
+
+            # Predict using pneumonia binary model
+            pneumonia_outputs = pneumonia_model(inputs)
+            _, pneumonia_preds = torch.max(pneumonia_outputs, 1)
+            pneumonia_label = pneumonia_preds.item()
+            pneumonia_confidence = torch.nn.functional.softmax(pneumonia_outputs, dim=1)
+            pneumonia_confidence_score = pneumonia_confidence[0][1].item()
+
+            confidence_scores = [covid_confidence_score, normal_confidence_score,
+                                 pneumonia_confidence_score]
+            pre_label = np.argmax(confidence_scores)
+        elif mtype == 'MOVR': # Previous OVR model
+            # Get the label for covid-19
+            covid_outputs = covid_model(inputs)
+            _, covid_preds = torch.max(covid_outputs, 1)
+            covid_label = covid_preds.item()
             
-#         if binary_label == 0:
-#             pre_label = binary_label + 1   # correct_label = 1 = normal/ correct_label = 2 = penumonia
-#         if binary_label == 1:
-#             pre_label = binary_label + 1
+            # Get the label for normal or pneumonia
+            nor_pneu_outputs = nor_pneu_model(inputs)
+            _, nor_pneu_preds = torch.max(nor_pneu_outputs, 1)
+            binary_label = nor_pneu_preds.item()  #pneumonia_label = 0 = normal/ penumonia_label = 1 = penumonia
 
-#         covid_outputs = covid_model(inputs)
-#         _, covid_preds = torch.max(covid_outputs, 1)
-#         covid_confidence = torch.nn.functional.softmax(covid_outputs, dim=1)
-#         covid_label = covid_preds.item()
-#         covid_confidence_score = covid_confidence[0][0].item()
-
-#         if covid_label == 0:
-#             if covid_confidence_score > covid_threshold:
-#                 pre_label = 0 
+            if binary_label == 0:
+                pre_label = binary_label + 1   # correct_label = 1 = normal/ correct_label = 2 = penumonia
+            if binary_label == 1:
+                pre_label = binary_label + 1
+            
+            # Calculate covid-19 confidence score
+            covid_confidence = torch.nn.functional.softmax(covid_outputs, dim=1)
+            covid_confidence_score = covid_confidence[0][0].item()
                 
-        # Basic OVR model
-        covid_outputs = covid_model(inputs)
-        _, covid_preds = torch.max(covid_outputs, 1)
-        covid_label = covid_preds.item()
-        covid_confidence = torch.nn.functional.softmax(covid_outputs, dim=1)
-        covid_confidence_score = covid_confidence[0][0].item()
-        
-        normal_outputs = normal_model(inputs)
-        _, normal_preds = torch.max(normal_outputs, 1)
-        normal_label = normal_preds.item()
-        normal_confidence = torch.nn.functional.softmax(normal_outputs, dim=1)
-        normal_confidence_score = normal_confidence[0][1].item()
-        
-        pneumonia_outputs = pneumonia_model(inputs)
-        _, pneumonia_preds = torch.max(pneumonia_outputs, 1)
-        pneumonia_label = pneumonia_preds.item()
-        pneumonia_confidence = torch.nn.functional.softmax(pneumonia_outputs, dim=1)
-        pneumonia_confidence_score = pneumonia_confidence[0][1].item()
-             
-        confidence_scores = [covid_confidence_score, normal_confidence_score, pneumonia_confidence_score]
-        pre_label = np.argmax(confidence_scores)
+            # Calculate normal confidence score
+            normal_confidence = torch.nn.functional.softmax(nor_pneu_outputs, dim=1)
+            normal_confidence_score = normal_confidence[0][0].item()
+            
+            # Calculate pneumonia confidence score
+            pneumonia_confidence = torch.nn.functional.softmax(nor_pneu_outputs, dim=1)
+            pneumonia_confidence_score = pneumonia_confidence[0][1].item()
+
+            # Cut off the covid label
+            if covid_label == 0:
+                if covid_confidence_score > covid_threshold:
+                    pre_label = 0
+                    
+            confidence_scores = [covid_confidence_score, normal_confidence_score,
+                                 pneumonia_confidence_score]
+        else: # Fine-tuning model
+            avidnet_outputs = avidnet(inputs)
+            _, avidnet_preds = torch.max(avidnet_outputs, 1)
+            avidnet_label = avidnet_preds.item()
+            
+            avidnet_confidence = torch.nn.functional.softmax(avidnet_outputs, dim=1)
+            covid_confidence_score = avidnet_confidence[0][0].item()
+            normal_confidence_score = avidnet_confidence[0][1].item()
+            pneumonia_confidence_score = avidnet_confidence[0][2].item()
+            
+            confidence_scores = [covid_confidence_score, normal_confidence_score,
+                                 pneumonia_confidence_score]
+            pre_label = np.argmax(confidence_scores)
+                    
+        # Save and print the prediction result
+        preds_dict[(pre_label, correct_label)].append(confidence_scores)
         print(pre_label, correct_label, confidence_scores)
                 
         # Calculate metrics
@@ -286,3 +411,36 @@ def eval_model(dataloaders, covid_model, normal_model, pneumonia_model,
         
     wb.save(f'{out_dir}/integrate_test.xlsx') # 엑셀로 저장한다. 
     #torch.save(model.state_dict(), 'covid_binary.pt')
+    
+    return preds_dict
+    
+    
+class AVIDNet(nn.Module):
+    '''https://discuss.pytorch.org/t/custom-ensemble-approach/52024/4'''
+    
+    def __init__(self, modelA, modelB, modelC, nb_classes=3):
+        super(AVIDNet, self).__init__()
+        self.modelA = modelA
+        self.modelB = modelB
+        self.modelC = modelC
+        
+        # Remove last linear layer
+        num_ftrs = self.modelA.fc.in_features
+        self.modelA.fc = nn.Identity()
+        self.modelB.fc = nn.Identity()
+        self.modelC.fc = nn.Identity()
+        
+        # Create new classifier
+        self.classifier = nn.Linear(num_ftrs*3, nb_classes)
+        
+    def forward(self, x):
+        x1 = self.modelA(x.clone())  # clone to make sure x is not changed by inplace methods
+        x1 = x1.view(x1.size(0), -1)
+        x2 = self.modelB(x.clone())
+        x2 = x2.view(x2.size(0), -1)
+        x3 = self.modelC(x)
+        x3 = x3.view(x3.size(0), -1)
+        x = torch.cat((x1, x2, x3), dim=1)
+        
+        x = self.classifier(F.relu(x))
+        return x

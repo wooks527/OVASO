@@ -2,6 +2,26 @@ import torch
 import os
 from torchvision import datasets, transforms
 
+def get_train_dataloaders(train_dir, batch_size=32):
+    data_transforms = {
+        'train': transforms.Compose([
+            #transforms.Resize(size=(224,224)),
+            transforms.Resize(280),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ]),
+    }
+    
+    image_datasets = datasets.ImageFolder(train_dir, data_transforms['train'])
+    dataloaders = torch.utils.data.DataLoader(image_datasets, batch_size=batch_size, shuffle=True, num_workers=4) 
+    dataset_sizes = len(image_datasets)
+    train_class_names = image_datasets.classes
+    print(train_class_names)
+    
+    return dataloaders
+    
+
 def get_dataloaders(val_dir, batch_size):
     # Data augmentation and normalization for training
     # Just normalization for validation
