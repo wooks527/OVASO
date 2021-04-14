@@ -9,7 +9,7 @@ def get_train_dataloaders(train_dir, batch_size=32):
             transforms.Resize(280),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+            transforms.Normalize([0.493, 0.493, 0.493], [0.246, 0.246, 0.246])
         ]),
     }
     
@@ -31,13 +31,14 @@ def get_dataloaders(val_dir, batch_size):
             transforms.Resize(280),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+            transforms.Normalize([0.493, 0.493, 0.493], [0.246, 0.246, 0.246])
         ]),
     }
 
     # Create the data loader
     image_datasets = datasets.ImageFolder(val_dir, data_transforms['test'])
-    dataloaders = torch.utils.data.DataLoader(image_datasets, batch_size=1, shuffle=True, num_workers=4) 
+    dataloaders = torch.utils.data.DataLoader(image_datasets, batch_size=1,
+                                              shuffle=False, num_workers=4) 
     dataset_sizes = len(image_datasets)
     val_class_names = image_datasets.classes
 
